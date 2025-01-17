@@ -6,6 +6,7 @@ import torch
 import os
 import configparser
 import time
+import base64
 from enum import Enum
 from urllib.parse import urljoin
 
@@ -33,13 +34,6 @@ class ConfigLoader:
             raise KeyError(f"Key '{key}' not found in section '{section}'. Please check your config.ini")
         return self.config[section][key]
 
-    def create_url(self, path):
-        try:
-            base_url = self.get_key('API', 'BASE_URL')
-            return urljoin(base_url, path)
-        except KeyError as e:
-            raise KeyError(f"Error constructing URL: {str(e)}")
-
     def set_x_key(self):
         try:
             x_key = self.get_key('API', 'X_KEY')
@@ -51,9 +45,9 @@ class ConfigLoader:
             print("Please ensure your config.ini contains a valid X_KEY under the [API] section")
             raise
 
-class FluxPro11:
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "generate_image"
+class FluxPro11WithFinetune:
+    RETURN_TYPES = ("IMAGE", "STRING")  # Added STRING return type for finetune_id
+    FUNCTION = "process"
     CATEGORY = "BFL"
 
     def __init__(self):
@@ -68,6 +62,7 @@ class FluxPro11:
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "mode": (["generate", "finetune", "inference"], {"default": "generate"}),
                 "prompt": ("STRING", {"default": "", "multiline": True}),
                 "ultra_mode": ("BOOLEAN", {"default": True}),
                 "aspect_ratio": ([
@@ -78,13 +73,36 @@ class FluxPro11:
                 "raw": ("BOOLEAN", {"default": False})
             },
             "optional": {
-                "seed": ("INT", {"default": -1})
+                "seed": ("INT", {"default": -1}),
+                # Finetuning parameters
+                "finetune_zip": ("STRING", {"default": ""}),
+                "finetune_comment": ("STRING", {"default": ""}),
+                "finetune_id": ("STRING", {"default": ""}),
+                "trigger_word": ("STRING", {"default": "TOK"}),
+                "finetune_mode": (["character", "product", "style", "general"], {"default": "general"}),
+                "iterations": ("INT", {"default": 300, "min": 100}),
+                "learning_rate": ("FLOAT", {"default": 0.00001}),
+                "captioning": ("BOOLEAN", {"default": True}),
+                "priority": (["speed", "quality"], {"default": "quality"}),
+                "finetune_type": (["full", "lora"], {"default": "full"}),
+                "lora_rank": ("INT", {"default": 32}),
+                "finetune_strength": ("FLOAT", {"default": 1.2})
             }
         }
 
+    def process(self, mode, **kwargs):
+        if mode == "generate":
+            img = self.generate_image(**kwargs)
+            return (*img, "")  # Return image and empty string for finetune_id
+        elif mode == "finetune":
+            return self.request_finetuning(**kwargs)
+        elif mode == "inference":
+            return self.finetune_inference(**kwargs)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
     def generate_image(self, prompt, ultra_mode, aspect_ratio, 
-                      safety_tolerance, output_format, raw, seed=-1):
-        
+                      safety_tolerance, output_format, raw, seed=-1, **kwargs):
         if not prompt:
             print("Error: Prompt cannot be empty")
             return self.create_blank_image()
@@ -101,7 +119,7 @@ class FluxPro11:
                 if seed != -1:
                     arguments["seed"] = seed
                     
-                url = "https://api.bfl.ml/v1/flux-pro-1.1-ultra"
+                url = "https://api.bfl.ai/v1/flux-pro-1.1-ultra"
             else:
                 width, height = self.get_dimensions_from_ratio(aspect_ratio)
                 arguments = {
@@ -114,17 +132,13 @@ class FluxPro11:
                 if seed != -1:
                     arguments["seed"] = seed
                     
-                url = "https://api.bfl.ml/v1/flux-pro-1.1"
+                url = "https://api.bfl.ai/v1/flux-pro-1.1"
 
             x_key = os.environ.get("X_KEY")
             if not x_key:
-                raise ValueError("X_KEY not found in environment variables. Please check your config.ini")
+                raise ValueError("X_KEY not found in environment variables")
 
             headers = {"x-key": x_key}
-            
-            print(f"Sending request to: {url}")
-            print(f"Arguments: {arguments}")
-            
             response = requests.post(url, json=arguments, headers=headers, timeout=30)
             
             if response.status_code == 200:
@@ -150,6 +164,79 @@ class FluxPro11:
             print(f"Unexpected Error: {str(e)}")
             return self.create_blank_image()
 
+    def request_finetuning(self, finetune_zip, finetune_comment, trigger_word="TOK",
+                          finetune_mode="general", iterations=300, learning_rate=0.00001,
+                          captioning=True, priority="quality", finetune_type="full", 
+                          lora_rank=32, **kwargs):
+        try:
+            if not os.path.exists(finetune_zip):
+                raise FileNotFoundError(f"ZIP file not found at {finetune_zip}")
+
+            with open(finetune_zip, "rb") as file:
+                encoded_zip = base64.b64encode(file.read()).decode("utf-8")
+
+            url = "https://api.bfl.ai/v1/finetune"
+            headers = {
+                "Content-Type": "application/json",
+                "X-Key": os.environ["X_KEY"],
+            }
+            
+            payload = {
+                "finetune_comment": finetune_comment,
+                "trigger_word": trigger_word,
+                "file_data": encoded_zip,
+                "iterations": iterations,
+                "mode": finetune_mode,
+                "learning_rate": learning_rate,
+                "captioning": captioning,
+                "priority": priority,
+                "lora_rank": lora_rank,
+                "finetune_type": finetune_type,
+            }
+
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            
+            # Return a blank image and the finetune_id
+            return (*self.create_blank_image(), result.get("id", ""))
+
+        except Exception as e:
+            print(f"Finetuning Error: {str(e)}")
+            return (*self.create_blank_image(), "")
+
+    def finetune_inference(self, finetune_id, prompt, ultra_mode=True, 
+                          finetune_strength=1.2, **kwargs):
+        try:
+            endpoint = "flux-pro-1.1-ultra-finetuned" if ultra_mode else "flux-pro-finetuned"
+            url = f"https://api.bfl.ai/v1/{endpoint}"
+            
+            headers = {
+                "Content-Type": "application/json",
+                "X-Key": os.environ["X_KEY"],
+            }
+            
+            payload = {
+                "finetune_id": finetune_id,
+                "finetune_strength": finetune_strength,
+                "prompt": prompt,
+                **kwargs
+            }
+
+            response = requests.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            
+            task_id = result.get("id")
+            if not task_id:
+                raise ValueError("No task ID received in response")
+                
+            return (*self.get_result(task_id, kwargs.get("output_format", "png")), finetune_id)
+
+        except Exception as e:
+            print(f"Inference Error: {str(e)}")
+            return (*self.create_blank_image(), "")
+
     def get_dimensions_from_ratio(self, aspect_ratio):
         regular_dimensions = {
             "1:1":  (1024, 1024),
@@ -174,7 +261,7 @@ class FluxPro11:
             return self.create_blank_image()
 
         try:
-            get_url = f"https://api.bfl.ml/v1/get_result?id={task_id}"
+            get_url = f"https://api.bfl.ai/v1/get_result?id={task_id}"
             headers = {"x-key": os.environ["X_KEY"]}
             
             response = requests.get(get_url, headers=headers, timeout=30)
@@ -212,9 +299,9 @@ class FluxPro11:
         return self.create_blank_image()
 
 NODE_CLASS_MAPPINGS = {
-    "FluxPro11": FluxPro11
+    "FluxPro11WithFinetune": FluxPro11WithFinetune
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "FluxPro11": "Flux Pro 1.1 Ultra & Raw"
+    "FluxPro11WithFinetune": "Flux Pro 1.1 Ultra & Raw with Finetuning"
 }
