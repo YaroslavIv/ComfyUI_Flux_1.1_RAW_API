@@ -40,7 +40,7 @@ Example `config.ini`:
 ```ini
 [API]
 X_KEY=your_api_key_here
-BASE_URL=https://api.bfl.ai/v1/
+BASE_URL=https://api.bfl.ai/
 ```
 
 ## Useful Links
