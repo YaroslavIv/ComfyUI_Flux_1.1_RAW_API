@@ -71,13 +71,13 @@ class FluxPro11WithFinetune:
             },
             "optional": {
                 "seed": ("INT", {"default": -1}),
-                "finetune_zip": ("STRING", {"default": ""}),
+                "finetune_zip": ("STRING", {"default": "", "multiline": False}),
                 "finetune_comment": ("STRING", {"default": ""}),
                 "finetune_id": ("STRING", {"default": ""}),
                 "trigger_word": ("STRING", {"default": "TOK"}),
                 "finetune_mode": (["character", "product", "style", "general"], {"default": "general"}),
                 "iterations": ("INT", {"default": 300, "min": 100}),
-                "learning_rate": ("FLOAT", {"default": 0.00001}),
+                "learning_rate": ("FLOAT", {"default": 0.00001, "min": 0.00001, "max": 0.0001, "step": 0.00001}),
                 "captioning": ("BOOLEAN", {"default": True}),
                 "priority": (["speed", "quality"], {"default": "quality"}),
                 "finetune_type": (["full", "lora"], {"default": "full"}),
@@ -182,6 +182,10 @@ class FluxPro11WithFinetune:
                           lora_rank=32, **kwargs):
         try:
             print("[FLUX API] Starting finetuning process")
+            if not finetune_comment:
+                print("[FLUX API] Error: finetune_comment is required")
+                return (*self.create_blank_image(), "")
+
             if not os.path.exists(finetune_zip):
                 print(f"[FLUX API] Error: ZIP file not found at {finetune_zip}")
                 return (*self.create_blank_image(), "")
@@ -210,52 +214,61 @@ class FluxPro11WithFinetune:
 
             print(f"[FLUX API] Sending finetuning request to {url}")
             response = requests.post(url, headers=headers, json=payload)
+            print(f"[FLUX API] Response status: {response.status_code}")
+            print(f"[FLUX API] Response text: {response.text}")
+            
             response.raise_for_status()
             result = response.json()
             
-            finetune_id = result.get("id", "")
+            finetune_id = result.get("finetune_id", "")
             print(f"[FLUX API] Finetuning initiated. ID: {finetune_id}")
             return (*self.create_blank_image(), finetune_id)
 
         except Exception as e:
             print(f"[FLUX API] Finetuning Error: {str(e)}")
+            print(f"[FLUX API] Error Type: {type(e).__name__}")
             return (*self.create_blank_image(), "")
 
     def finetune_inference(self, finetune_id, prompt, ultra_mode=True, 
-                          finetune_strength=1.2, **kwargs):
-        try:
-            print(f"[FLUX API] Starting inference with finetune_id: {finetune_id}")
-            endpoint = "flux-pro-1.1-ultra-finetuned" if ultra_mode else "flux-pro-finetuned"
-            url = f"https://api.bfl.ai/v1/{endpoint}"
-            
-            headers = {
-                "Content-Type": "application/json",
-                "X-Key": os.environ["X_KEY"],
-            }
-            
-            payload = {
-                "finetune_id": finetune_id,
-                "finetune_strength": finetune_strength,
-                "prompt": prompt,
-                **kwargs
-            }
+                         finetune_strength=1.2, **kwargs):
+       try:
+           print(f"[FLUX API] Starting inference with finetune_id: {finetune_id}")
+           endpoint = "flux-pro-1.1-ultra-finetuned" if ultra_mode else "flux-pro-finetuned"
+           url = f"https://api.bfl.ai/v1/{endpoint}"
+           
+           headers = {
+               "Content-Type": "application/json",
+               "X-Key": os.environ["X_KEY"],
+           }
+           
+           payload = {
+               "finetune_id": finetune_id,
+               "finetune_strength": finetune_strength,
+               "prompt": prompt,
+               **kwargs
+           }
 
-            print(f"[FLUX API] Sending inference request to {url}")
-            response = requests.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            result = response.json()
-            
-            task_id = result.get("id")
-            if not task_id:
-                print("[FLUX API] Error: No task ID received for inference")
-                return (*self.create_blank_image(), finetune_id)
-                
-            print(f"[FLUX API] Inference task ID: {task_id}")
-            return (*self.get_result(task_id, kwargs.get("output_format", "png")), finetune_id)
+           print(f"[FLUX API] Sending inference request to {url}")
+           print(f"[FLUX API] Payload: {payload}")
+           response = requests.post(url, headers=headers, json=payload)
+           print(f"[FLUX API] Response Status: {response.status_code}")
+           print(f"[FLUX API] Response Text: {response.text}")
+           
+           response.raise_for_status()
+           result = response.json()
+           
+           task_id = result.get("id")
+           if not task_id:
+               print("[FLUX API] Error: No task ID received for inference")
+               return (*self.create_blank_image(), finetune_id)
+               
+           print(f"[FLUX API] Inference task ID: {task_id}")
+           return (*self.get_result(task_id, kwargs.get("output_format", "png")), finetune_id)
 
-        except Exception as e:
-            print(f"[FLUX API] Inference Error: {str(e)}")
-            return (*self.create_blank_image(), finetune_id)
+       except Exception as e:
+           print(f"[FLUX API] Inference Error: {str(e)}")
+           print(f"[FLUX API] Error Type: {type(e).__name__}")
+           return (*self.create_blank_image(), finetune_id)
 
     def get_dimensions_from_ratio(self, aspect_ratio):
         regular_dimensions = {
@@ -275,65 +288,71 @@ class FluxPro11WithFinetune:
         img_tensor = torch.from_numpy(img_array)[None,]
         return (img_tensor,)
 
-    def get_result(self, task_id, output_format, attempt=1, max_attempts=10):
-        if attempt > max_attempts:
-            print(f"[FLUX API] Max attempts reached for task_id {task_id}")
-            return self.create_blank_image()
+    def get_result(self, task_id, output_format, attempt=1, max_attempts=15):
+       if attempt > max_attempts:
+           print(f"[FLUX API] Max attempts reached for task_id {task_id}")
+           return self.create_blank_image()
 
-        try:
-            get_url = f"https://api.bfl.ai/v1/get_result?id={task_id}"
-            headers = {"x-key": os.environ["X_KEY"]}
-            
-            print(f"[FLUX API] Attempt {attempt}: Checking result for task {task_id}")
-            
-            response = requests.get(get_url, headers=headers, timeout=30)
-            print(f"[FLUX API] Response Status: {response.status_code}")
-            
-            if response.status_code == 200:
-                result = response.json()
-                status = result.get("status")
-                print(f"[FLUX API] Task Status: {status}")
-                
-                if status == Status.READY.value:
-                    sample_url = result.get('result', {}).get('sample')
-                    if not sample_url:
-                        print("[FLUX API] Error: No sample URL in response")
-                        print(f"[FLUX API] Response data: {result}")
-                        return self.create_blank_image()
-                        
-                    img_response = requests.get(sample_url, timeout=30)
-                    if img_response.status_code != 200:
-                        print(f"[FLUX API] Error downloading image: {img_response.status_code}")
-                        return self.create_blank_image()
-                    
-                    img = Image.open(io.BytesIO(img_response.content))
-                    
-                    with io.BytesIO() as output:
-                        img.save(output, format=output_format.upper())
-                        output.seek(0)
-                        img_converted = Image.open(output)
-                        img_array = np.array(img_converted).astype(np.float32) / 255.0
-                        print(f"[FLUX API] Successfully generated image for task {task_id}")
-                        return (torch.from_numpy(img_array)[None,],)
-                        
-                elif status == Status.PENDING.value:
-                    print(f"[FLUX API] Attempt {attempt}: Image not ready. Retrying in 5 seconds...")
-                    time.sleep(5)
-                    return self.get_result(task_id, output_format, attempt + 1)
-                else:
-                    print(f"[FLUX API] Unexpected status: {status}")
-                    print(f"[FLUX API] Full response: {result}")
-                    return self.create_blank_image()
-                    
-            else:
-                print(f"[FLUX API] Error retrieving result: {response.status_code}")
-                print(f"[FLUX API] Response: {response.text}")
-              
-        except Exception as e:
-            print(f"[FLUX API] Error retrieving result: {str(e)}")
-            print(f"[FLUX API] Error Type: {type(e).__name__}")
-                
-        return self.create_blank_image()
+       try:
+           get_url = f"https://api.bfl.ai/v1/get_result?id={task_id}"
+           headers = {"x-key": os.environ["X_KEY"]}
+           
+           wait_time = min(2 ** attempt + 5, 30)
+           print(f"[FLUX API] Waiting {wait_time} seconds before attempt {attempt}")
+           time.sleep(wait_time)
+           
+           print(f"[FLUX API] Attempt {attempt}: Checking result for task {task_id}")
+           response = requests.get(get_url, headers=headers, timeout=30)
+           print(f"[FLUX API] Response Status: {response.status_code}")
+           
+           if response.status_code == 200:
+               result = response.json()
+               status = result.get("status")
+               print(f"[FLUX API] Task Status: {status}")
+               
+               if status == Status.READY.value:
+                   sample_url = result.get('result', {}).get('sample')
+                   if not sample_url:
+                       print("[FLUX API] Error: No sample URL in response")
+                       print(f"[FLUX API] Response data: {result}")
+                       return self.create_blank_image()
+                       
+                   img_response = requests.get(sample_url, timeout=30)
+                   if img_response.status_code != 200:
+                       print(f"[FLUX API] Error downloading image: {img_response.status_code}")
+                       return self.create_blank_image()
+                   
+                   img = Image.open(io.BytesIO(img_response.content))
+                   
+                   with io.BytesIO() as output:
+                       img.save(output, format=output_format.upper())
+                       output.seek(0)
+                       img_converted = Image.open(output)
+                       img_array = np.array(img_converted).astype(np.float32) / 255.0
+                       print(f"[FLUX API] Successfully generated image for task {task_id}")
+                       return (torch.from_numpy(img_array)[None,],)
+                       
+               elif status == Status.PENDING.value:
+                   print(f"[FLUX API] Attempt {attempt}: Image not ready. Retrying...")
+                   return self.get_result(task_id, output_format, attempt + 1)
+               else:
+                   print(f"[FLUX API] Unexpected status: {status}")
+                   print(f"[FLUX API] Full response: {result}")
+                   return self.create_blank_image()
+                   
+           else:
+               print(f"[FLUX API] Error retrieving result: {response.status_code}")
+               print(f"[FLUX API] Response: {response.text}")
+               if attempt < max_attempts:
+                   return self.get_result(task_id, output_format, attempt + 1)
+               
+       except Exception as e:
+           print(f"[FLUX API] Error retrieving result: {str(e)}")
+           print(f"[FLUX API] Error Type: {type(e).__name__}")
+           if attempt < max_attempts:
+               return self.get_result(task_id, output_format, attempt + 1)
+               
+       return self.create_blank_image()
 
 NODE_CLASS_MAPPINGS = {
     "FluxPro11WithFinetune": FluxPro11WithFinetune
