@@ -34,14 +34,7 @@ Additional Capabilities:
 
 1. Create a folder in your `ComfyUI/custom_nodes/` directory named `ComfyUI_Flux_1.1_RAW_API`
 2. Copy the files from this repository into that folder
-3. Create a `config.ini` file in the same directory with your FLUX API key
 
-Example `config.ini`:
-```ini
-[API]
-X_KEY=your_api_key_here
-BASE_URL=https://api.bfl.ai/
-```
 
 ## Useful Links
 
